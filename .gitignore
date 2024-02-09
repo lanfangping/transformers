@@ -141,6 +141,7 @@ runs
 /examples/runs
 /examples/**/*.args
 /examples/rag/sweep
+/examples/**/*/wandb
 
 # data
 /data
@@ -167,3 +168,4 @@ tags
 
 # ruff
 .ruff_cache
+
