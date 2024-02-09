@@ -21,6 +21,7 @@ import os
 import random
 import sys
 import warnings
+import difflib
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -78,12 +79,21 @@ class DataTrainingArguments:
             "help": "Whether to do regression instead of classification. If None, will be inferred from the dataset."
         },
     )
-    text_column_names: Optional[str] = field(
+    text_column_name: Optional[str] = field(
         default=None,
         metadata={
             "help": (
                 "The name of the text column in the input dataset or a CSV/JSON file. "
                 'If not specified, will use the "sentence" column for single/multi-label classifcation task.'
+            )
+        },
+    )
+    text_pair_column_name: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": (
+                "The name of the text pair column in the input dataset or a CSV/JSON file. "
+                'If not specified, it will not use.'
             )
         },
     )
@@ -188,6 +198,8 @@ class DataTrainingArguments:
     )
     test_file: Optional[str] = field(default=None, metadata={"help": "A csv or a json file containing the test data."})
 
+    enhance_attention_on_difference: Optional[bool] = field(default=False, metadata={"help": "Enhancing the attention weight on the difference part between a text pair."})
+
     def __post_init__(self):
         if self.dataset_name is None:
             if self.train_file is None or self.validation_file is None:
@@ -261,7 +273,6 @@ class ModelArguments:
 
 def get_label_list(raw_dataset, split="train") -> List[str]:
     """Get the list of labels from a mutli-label dataset"""
-
     if isinstance(raw_dataset[split]["label"][0], list):
         label_list = [label for sample in raw_dataset[split]["label"] for label in sample]
         label_list = list(set(label_list))
@@ -284,6 +295,11 @@ def main():
         model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+
+    # print("model_args", model_args)
+    # print("data_args", data_args)
+    # print("training_args", training_args)
+    # exit()
 
     if model_args.use_auth_token is not None:
         warnings.warn(
@@ -342,7 +358,7 @@ def main():
     set_seed(training_args.seed)
 
     # Get the datasets: you can either provide your own CSV/JSON training and evaluation files, or specify a dataset name
-    # to load from huggingface/datasets. In ether case, you can specify a the key of the column(s) containing the text and
+    # to load from huggingface/datasets. In either case, you can specify a the key of the column(s) containing the text and
     # the key of the column containing the label. If multiple columns are specified for the text, they will be joined togather
     # for the actual text value.
     # In distributed training, the load_dataset function guarantee that only one local process can concurrently
@@ -428,14 +444,18 @@ def main():
         for key in raw_datasets.keys():
             raw_datasets[key] = raw_datasets[key].rename_column(data_args.label_column_name, "label")
 
-    # Trying to have good defaults here, don't hesitate to tweak to your needs.
+    # convert data to an appropriate datatype 
+    def convert_appropriate_datatype(examples):
+        examples['label'] = eval(examples['label'])
+        return examples
+    raw_datasets = raw_datasets.map(convert_appropriate_datatype)
 
+    # Trying to have good defaults here, don't hesitate to tweak to your needs.
     is_regression = (
         raw_datasets["train"].features["label"].dtype in ["float32", "float64"]
         if data_args.do_regression is None
         else data_args.do_regression
     )
-
     is_multi_label = False
     if is_regression:
         label_list = None
@@ -565,17 +585,87 @@ def main():
         for label in labels:
             ids[label_to_id[label]] = 1.0
         return ids
+    
+    def find_first_element_in_list(element, array_list, begin_idx=0):
+        for idx in range(begin_idx, len(array_list)):
+            if array_list[idx] == element:
+                return idx
+        return -1
+
+    def find_diff_indexes_in_arrays(array, array_pair, item_real_begin_index=0, item_pair_real_begin_index=0):
+        # convert int array to strin array
+        array = [str(a) for a in array]
+        array_pair = [str(a) for a in array_pair]
+
+        # Creating a Differ object
+        d = difflib.Differ()
+
+        # Calculating the difference
+        diff = list(d.compare(array, array_pair))
+        # print(diff)
+        # # Extracting the index of changing words
+        # changes = [i for i, word in enumerate(diff) if word.startswith("+ ") or word.startswith("- ")]
+
+        i, j = 0, 0
+        old_diff = []
+        new_diff = []
+        for idx, word in enumerate(diff):
+            if word.startswith("+"):
+                new_diff.append(i)
+                i += 1
+            elif word.startswith("-"):
+                old_diff.append(j)
+                j += 1
+            else:
+                i += 1
+                j += 1
+
+        return old_diff, new_diff
+
+    def process_attention_weight(input_ids):
+        attetion_masks = []
+        for i, ids in enumerate(input_ids):
+            sep_idx1 = find_first_element_in_list(tokenizer.sep_token_id, ids, begin_idx=0)
+            array = ids[1:sep_idx1]
+
+            sep_idx2 = find_first_element_in_list(tokenizer.sep_token_id, ids, begin_idx=sep_idx1+1)
+            array_pair = ids[sep_idx1+1:sep_idx2]
+                
+            temp_old_diff, temp_new_diff = find_diff_indexes_in_arrays(array, array_pair)
+            old_diff = [idx+1 for idx in temp_old_diff]
+            new_diff = [idx+sep_idx1+1 for idx in temp_new_diff]
+            changes = old_diff + new_diff
+
+            atte_mask = []
+            for idx in range(len(ids)):
+                if idx in changes:
+                    atte_mask.append(1)
+                elif ids[idx] == tokenizer.pad_token_id:
+                    atte_mask.append(0)
+                else:
+                    atte_mask.append(0.5)
+            attetion_masks.append(atte_mask)
+
+        return attetion_masks
 
     def preprocess_function(examples):
-        if data_args.text_column_names is not None:
-            text_column_names = data_args.text_column_names.split(",")
-            # join together text columns into "sentence" column
-            examples["sentence"] = examples[text_column_names[0]]
-            for column in text_column_names[1:]:
-                for i in range(len(examples[column])):
-                    examples["sentence"][i] += data_args.text_column_delimiter + examples[column][i]
-        # Tokenize the texts
-        result = tokenizer(examples["sentence"], padding=padding, max_length=max_seq_length, truncation=True)
+        # if data_args.text_column_names is not None and data_args.text_pair_column_names:
+        #     text_column_names = data_args.text_column_names.split(",")
+        #     # join together text columns into "sentence" column
+        #     examples["sentence"] = examples[text_column_names[0]]
+        #     for column in text_column_names[1:]:
+        #         for i in range(len(examples[column])):
+        #             examples["sentence"][i] += data_args.text_column_delimiter + examples[column][i]
+        if data_args.text_pair_column_name is not None:
+            result = tokenizer(examples[data_args.text_pair_column_name], examples[data_args.text_pair_column_name], padding=padding, max_length=max_seq_length, truncation=True)
+
+            # changes the attention weight on difference part
+            if data_args.enhance_attention_on_difference:
+                result['attention_mask'] = process_attention_weight(result['input_ids'])
+        else:
+            # Tokenize the texts
+            result = tokenizer(examples[data_args.text_pair_column_name], padding=padding, max_length=max_seq_length, truncation=True)
+        
         if label_to_id is not None and "label" in examples:
             if is_multi_label:
                 result["label"] = [multi_labels_to_ids(l) for l in examples["label"]]
@@ -592,6 +682,8 @@ def main():
             desc="Running tokenizer on dataset",
         )
 
+        print(raw_datasets)
+    
     if training_args.do_train:
         if "train" not in raw_datasets:
             raise ValueError("--do_train requires a train dataset.")

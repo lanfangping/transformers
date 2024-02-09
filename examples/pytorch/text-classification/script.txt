@@ -1,0 +1,48 @@
+dataset="reuters21578"
+subset="ModApte"
+python run_classification.py \
+    --model_name_or_path bert-base-uncased \
+    --dataset_name ${dataset} \
+    --dataset_config_name ${subset} \
+    --shuffle_train_dataset \
+    --remove_splits "unused" \
+    --metric_name f1 \
+    --text_column_name text \
+    --label_column_name topics \
+    --do_train \
+    --do_eval \
+    --max_seq_length 512 \
+    --per_device_train_batch_size 32 \
+    --learning_rate 2e-5 \
+    --num_train_epochs 15 \
+    --output_dir /tmp/${dataset}_${subset}/ 
+
+
+train_file_dir="../../../../CompareDBDoc/datasets/data_humanlabel/train_valid_test_data/spc2/train_data_Jan19.csv"
+test_file_dir="../../../../CompareDBDoc/datasets/data_humanlabel/train_valid_test_data/spc2/sampled_data_Jan19.csv"
+validation_file_dir="../../../../CompareDBDoc/datasets/data_humanlabel/train_valid_test_data/spc2/valid_data_Jan19.csv"
+output_dir="./checkpoints"
+python run_classification.py \
+    --model_name_or_path bert-base-uncased \
+    --train_file ${train_file_dir} \
+    --test_file ${test_file_dir} \
+    --validation_file ${validation_file_dir} \
+    --dataset_config_name ${subset} \
+    --shuffle_train_dataset \
+    --metric_name f1 \
+    --text_column_name old_snippet \
+    --text_pair_column_name new_snippet \
+    --label_column_name labels \
+    --do_train \
+    --do_eval \
+    --do_predict \
+    --max_seq_length 512 \
+    --per_device_train_batch_size 8 \
+    --learning_rate 2e-5 \
+    --num_train_epochs 5 \
+    --output_dir ${output_dir}/ 
+
+
+Notes: 
+1. if dataset_name is None, then the dataset comes from local file, else the dataset comes from huggingface Dataset card\
+    - if it comes from local file, specify train, test and validation datasets respectively by --train_file, --test_file and --validation_file
