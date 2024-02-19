@@ -169,3 +169,5 @@ tags
 # ruff
 .ruff_cache
 
+# checkpoints
+examples/pytorch/text-classification/checkpoints/*
