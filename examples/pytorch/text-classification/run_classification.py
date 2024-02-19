@@ -28,7 +28,12 @@ from typing import List, Optional
 import datasets
 import evaluate
 import numpy as np
+import pandas as pd
 from datasets import Value, load_dataset
+from sklearn.metrics import roc_curve, auc, classification_report
+import torch
+
+from categories import EDIT_CATEGORIES
 
 import transformers
 from transformers import (
@@ -53,6 +58,8 @@ check_min_version("4.38.0.dev0")
 
 require_version("datasets>=1.8.0", "To fix: pip install -r examples/pytorch/text-classification/requirements.txt")
 
+os.environ["WANDB_PROJECT"] = "manualcmp"  # name your W&B project
+os.environ["WANDB_LOG_MODEL"] = "checkpoint"
 
 logger = logging.getLogger(__name__)
 
@@ -295,7 +302,8 @@ def main():
         model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
-
+    
+    # print(training_args.device)
     # print("model_args", model_args)
     # print("data_args", data_args)
     # print("training_args", training_args)
@@ -657,7 +665,7 @@ def main():
         #         for i in range(len(examples[column])):
         #             examples["sentence"][i] += data_args.text_column_delimiter + examples[column][i]
         if data_args.text_pair_column_name is not None:
-            result = tokenizer(examples[data_args.text_pair_column_name], examples[data_args.text_pair_column_name], padding=padding, max_length=max_seq_length, truncation=True)
+            result = tokenizer(examples[data_args.text_column_name], examples[data_args.text_pair_column_name], padding=padding, max_length=max_seq_length, truncation=True)
 
             # changes the attention weight on difference part
             if data_args.enhance_attention_on_difference:
@@ -683,6 +691,10 @@ def main():
         )
 
         print(raw_datasets)
+        # print(np.shape(raw_datasets['test']['label']))
+    # print(raw_datasets['train'][100])
+    # print(tokenizer.convert_ids_to_tokens(raw_datasets['train'][100]['input_ids']))
+    # exit()
     
     if training_args.do_train:
         if "train" not in raw_datasets:
@@ -746,11 +758,18 @@ def main():
 
     def compute_metrics(p: EvalPrediction):
         preds = p.predictions[0] if isinstance(p.predictions, tuple) else p.predictions
+
         if is_regression:
             preds = np.squeeze(preds)
             result = metric.compute(predictions=preds, references=p.label_ids)
         elif is_multi_label:
-            preds = np.array([np.where(p > 0, 1, 0) for p in preds])  # convert logits to multi-hot encoding
+            sigmoid = torch.nn.Sigmoid()
+            probs = sigmoid(torch.Tensor(preds)).numpy()
+            # next, use threshold to turn them into integer predictions
+            preds = np.zeros(probs.shape)
+            preds[np.where(probs >= 0.3)] = 1
+
+            # preds = np.array([np.where(p > 0, 1, 0) for p in preds])  # convert logits to multi-hot encoding
             # Micro F1 is commonly used in multi-label classification
             result = metric.compute(predictions=preds, references=p.label_ids, average="micro")
         else:
@@ -807,22 +826,57 @@ def main():
         trainer.log_metrics("eval", metrics)
         trainer.save_metrics("eval", metrics)
 
+    # find the optimal threshold for test dataset
+    def optimal_threshold(y_true, y_pred):
+        y_true = np.concatenate(y_true)
+        y_pred = y_pred.ravel()
+
+        # Calculate ROC curve
+        fpr, tpr, thresholds = roc_curve(y_true, y_pred)
+        roc_auc = auc(fpr, tpr)
+
+        # Calculate Youden's J statistic
+        J = tpr - fpr
+
+        # Find the optimal threshold
+        optimal_idx = np.argmax(J)
+        optimal_threshold = thresholds[optimal_idx]
+
+        return optimal_threshold
+
     if training_args.do_predict:
         logger.info("*** Predict ***")
         # Removing the `label` columns if exists because it might contains -1 and Trainer won't like that.
+        y_true = None
         if "label" in predict_dataset.features:
+            y_true = predict_dataset['label']
             predict_dataset = predict_dataset.remove_columns("label")
         predictions = trainer.predict(predict_dataset, metric_key_prefix="predict").predictions
         if is_regression:
             predictions = np.squeeze(predictions)
         elif is_multi_label:
-            # Convert logits to multi-hot encoding. We compare the logits to 0 instead of 0.5, because the sigmoid is not applied.
-            # You can also pass `preprocess_logits_for_metrics=lambda logits, labels: nn.functional.sigmoid(logits)` to the Trainer
-            # and set p > 0.5 below (less efficient in this case)
-            predictions = np.array([np.where(p > 0, 1, 0) for p in predictions])
+            # # (deprecated)Convert logits to multi-hot encoding. We compare the logits to 0 instead of 0.5, because the sigmoid is not applied.
+            # # (deprecated)You can also pass `preprocess_logits_for_metrics=lambda logits, labels: nn.functional.sigmoid(logits)` to the Trainer
+            # # (deprecated)and set p > 0.5 below (less efficient in this case)
+            # (deprecated)predictions = np.array([np.where(p > 0, 1, 0) for p in predictions])
+            # Convert logits to multi-hot encoding and apply sigmod to logits. 
+            # We compare the value to optimal threshold or default 0.3.
+            sigmoid = torch.nn.Sigmoid()
+            probs = sigmoid(torch.Tensor(predictions)).numpy()
+
+            # find the optimal threshold, other use 0.3 as default threshold
+            threshold = 0.3
+            if y_true is not None:
+                threshold = optimal_threshold(y_true, probs)
+            # print("optimal threshold:", threshold)
+            
+            # next, use threshold to turn them into integer predictions
+            predictions = np.zeros(probs.shape)
+            predictions[np.where(probs >= threshold)] = 1
         else:
             predictions = np.argmax(predictions, axis=1)
         output_predict_file = os.path.join(training_args.output_dir, "predict_results.txt")
+        output_metrics_file = os.path.join(training_args.output_dir, "predict_metrics.txt")
         if trainer.is_world_process_zero():
             with open(output_predict_file, "w") as writer:
                 logger.info("***** Predict results *****")
@@ -837,7 +891,33 @@ def main():
                     else:
                         item = label_list[item]
                         writer.write(f"{index}\t{item}\n")
-        logger.info("Predict results saved at {}".format(output_predict_file))
+            logger.info("Predict results saved at {}".format(output_predict_file))
+
+            if y_true is not None: 
+                with open(output_metrics_file, "w") as writer:
+                    logger.info("***** Predict metrics *****")
+                    # print(model.config.label2id.keys())
+                    # print([EDIT_CATEGORIES[key] for key in model.config.label2id.keys()])
+                    # labels = ['1.1', '1.3', '2.1', '3.1', '3.2', '3.3', '4.1', '5']# list(model.config.label2id.keys())
+                    # labels = [str(key) for key in model.config.label2id.keys()]
+                    # print(labels)
+                    # print(type(labels))
+                    # print(np.shape(y_true))
+                    # print(np.shape(predictions))
+                    report = classification_report(y_true, predictions, output_dict=True)
+                    # writer.write(" | precision | recall | f1-score | support".format(str(report)))
+                    # for labelid in report.keys():
+                    #     if labelid in model.config.id2label.keys():
+                    #         label = model.config.id2label[labelid]
+                    #         target_name = EDIT_CATEGORIES[label]
+                            
+                    #         writer.write("{} {} | {} ".format(label, target_name, ""))
+                    
+                    print(type(report))
+                    print(report) 
+                    writer.write("{}".format(str(report)))
+                logger.info("Predict metrics saved at {}".format(output_metrics_file))
+
     kwargs = {"finetuned_from": model_args.model_name_or_path, "tasks": "text-classification"}
 
     if training_args.push_to_hub:
