@@ -69,6 +69,32 @@ CUDA_VISIBLE_DEVICES=0 python run_classification.py \
     --output_dir ${output_dir}/ \
     --report_to none 
 
+# heatmap only
+train_file_dir="../../../../CompareDBDoc/datasets/data_humanlabel/train_valid_test_data/spc2/train_data_Jan19.csv"
+test_file_dir="../../../../CompareDBDoc/datasets/data_humanlabel/train_valid_test_data/spc2/sampled_data_Jan19.csv"
+validation_file_dir="../../../../CompareDBDoc/datasets/data_humanlabel/train_valid_test_data/spc2/valid_data_Jan19.csv"
+output_dir="./checkpoints/checkpoints2402191335"
+CUDA_VISIBLE_DEVICES=0 python run_classification.py \
+    --model_name_or_path ${output_dir} \
+    --train_file ${train_file_dir} \
+    --test_file ${test_file_dir} \
+    --validation_file ${validation_file_dir} \
+    --output_attentions True \
+    --sample_index_for_output_attentions 1 \
+    --draw_attention_heatmap \
+    --test_file ${test_file_dir} \
+    --metric_name f1 \
+    --text_column_name old_snippet \
+    --text_pair_column_name new_snippet \
+    --label_column_name labels \
+    --enhance_attention_on_difference True \
+    --max_seq_length 512 \
+    --per_device_train_batch_size 8 \
+    --learning_rate 2e-5 \
+    --num_train_epochs 5 \
+    --output_dir ${output_dir}/ \
+    --report_to none 
+
 
 Notes: 
 1. if dataset_name is None, then the dataset comes from local file, else the dataset comes from huggingface Dataset card\

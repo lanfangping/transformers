@@ -22,6 +22,7 @@ import random
 import sys
 import warnings
 import difflib
+import datetime
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -32,8 +33,12 @@ import pandas as pd
 from datasets import Value, load_dataset
 from sklearn.metrics import roc_curve, auc, classification_report
 import torch
+import seaborn as sns
+import matplotlib.pyplot as plt
 
 from categories import EDIT_CATEGORIES
+from utils import heatmap
+from bertviz import model_view
 
 import transformers
 from transformers import (
@@ -277,6 +282,33 @@ class ModelArguments:
         metadata={"help": "Will enable to load a pretrained model whose head dimensions are different."},
     )
 
+    output_attentions: bool  = field(
+        default=False,
+        metadata={"help": (
+                        "Will enable to output attention weights for model", 
+                        "output shape = tuple(Tensor(batch_size, num_heads, sequence_a, sequence_b)(one for each layer))"
+                    )
+        },
+    )
+
+    sample_index_for_output_attentions: Optional[int] = field(
+        default=0,
+        metadata={"help": (
+                        "Will enable to see attention weights for a specific data"
+                    )
+        },
+    )
+
+    draw_attention_heatmap: Optional[bool] = field(
+        default=False, 
+        metadata={"help": "Draw attention heatmap for the sampled data in `sample_index_for_output_attentions`"}
+    )
+
+    inference_only: Optional[bool] = field(
+        default=False, 
+        metadata={"help": "Do inference only"}
+    )
+
 
 def get_label_list(raw_dataset, split="train") -> List[str]:
     """Get the list of labels from a mutli-label dataset"""
@@ -388,16 +420,16 @@ def main():
         data_files = {"train": data_args.train_file, "validation": data_args.validation_file}
 
         # Get the test dataset: you can provide your own CSV/JSON test file
-        if training_args.do_predict:
-            if data_args.test_file is not None:
-                train_extension = data_args.train_file.split(".")[-1]
-                test_extension = data_args.test_file.split(".")[-1]
-                assert (
-                    test_extension == train_extension
-                ), "`test_file` should have the same extension (csv or json) as `train_file`."
-                data_files["test"] = data_args.test_file
-            else:
-                raise ValueError("Need either a dataset name or a test file for `do_predict`.")
+        # if training_args.do_predict:
+        if data_args.test_file is not None:
+            train_extension = data_args.train_file.split(".")[-1]
+            test_extension = data_args.test_file.split(".")[-1]
+            assert (
+                test_extension == train_extension
+            ), "`test_file` should have the same extension (csv or json) as `train_file`."
+            data_files["test"] = data_args.test_file
+        elif training_args.do_predict:
+            raise ValueError("Need either a dataset name or a test file for `do_predict`.")
 
         for key in data_files.keys():
             logger.info(f"load a local file for {key}: {data_files[key]}")
@@ -524,6 +556,7 @@ def main():
         revision=model_args.model_revision,
         token=model_args.token,
         trust_remote_code=model_args.trust_remote_code,
+        output_attentions=model_args.output_attentions
     )
 
     if is_regression:
@@ -851,7 +884,13 @@ def main():
         if "label" in predict_dataset.features:
             y_true = predict_dataset['label']
             predict_dataset = predict_dataset.remove_columns("label")
-        predictions = trainer.predict(predict_dataset, metric_key_prefix="predict").predictions
+
+        # print(predict_dataset)
+        results = trainer.predict(predict_dataset, metric_key_prefix="predict")
+        # print("results", results)
+        predictions = results.predictions
+        # print("predictions", predictions)
+        # predictions = trainer.predict(predict_dataset, metric_key_prefix="predict").predictions
         if is_regression:
             predictions = np.squeeze(predictions)
         elif is_multi_label:
@@ -862,6 +901,8 @@ def main():
             # Convert logits to multi-hot encoding and apply sigmod to logits. 
             # We compare the value to optimal threshold or default 0.3.
             sigmoid = torch.nn.Sigmoid()
+            if model_args.output_attentions:
+                predictions = predictions[0]
             probs = sigmoid(torch.Tensor(predictions)).numpy()
 
             # find the optimal threshold, other use 0.3 as default threshold
@@ -896,28 +937,74 @@ def main():
             if y_true is not None: 
                 with open(output_metrics_file, "w") as writer:
                     logger.info("***** Predict metrics *****")
-                    # print(model.config.label2id.keys())
-                    # print([EDIT_CATEGORIES[key] for key in model.config.label2id.keys()])
-                    # labels = ['1.1', '1.3', '2.1', '3.1', '3.2', '3.3', '4.1', '5']# list(model.config.label2id.keys())
-                    # labels = [str(key) for key in model.config.label2id.keys()]
-                    # print(labels)
-                    # print(type(labels))
-                    # print(np.shape(y_true))
-                    # print(np.shape(predictions))
                     report = classification_report(y_true, predictions, output_dict=True)
-                    # writer.write(" | precision | recall | f1-score | support".format(str(report)))
-                    # for labelid in report.keys():
-                    #     if labelid in model.config.id2label.keys():
-                    #         label = model.config.id2label[labelid]
-                    #         target_name = EDIT_CATEGORIES[label]
-                            
-                    #         writer.write("{} {} | {} ".format(label, target_name, ""))
-                    
-                    print(type(report))
                     print(report) 
                     writer.write("{}".format(str(report)))
                 logger.info("Predict metrics saved at {}".format(output_metrics_file))
+    
+    if model_args.output_attentions:
+        model.eval()
+        sample_index = model_args.sample_index_for_output_attentions
 
+        predict_dataset.set_format(type='torch', columns=['input_ids', 'attention_mask', 'token_type_ids'])
+        record = predict_dataset[sample_index]
+        
+        record = {k: v.cuda().unsqueeze(0) for k,v in record.items() if k in ['input_ids', 'token_type_ids', 'attention_mask']}
+
+        attentions = model(**record).attentions  
+        
+        layer = -1 # the last layer
+        last_layer_attention = attentions[layer]
+        # print("attentions shape", attentions[0].size())
+        average_heads_attention = torch.mean(last_layer_attention, dim=1)  # Averaging across heads # For the last layer, shape: [batch_size, num_heads, seq_len, seq_len]
+        tokens = tokenizer.convert_ids_to_tokens(record['input_ids'].tolist()[0])  # Convert input ids to token strings
+        print(tokens)
+        # Assuming you're working with the first item in the batch
+        average_attention_np = average_heads_attention[0].cpu().detach().numpy()
+        print("average_attention_np", np.shape(average_attention_np))
+
+        # attention only for CLS token
+        attention_CLS = average_attention_np[:][0]
+        print("attention_CLS shape", np.shape(attention_CLS))
+        attention_CLS = attention_CLS.reshape((np.shape(attention_CLS)[0], 1))
+        print("attention_CLS reshape", np.shape(attention_CLS))
+        second_SEP_position = 0
+        for i in range(len(tokens)-1, 0, -1):
+            if tokens[i] == '[SEP]':
+                second_SEP_position = i
+        print("second_SEP_position", second_SEP_position)
+        attention_CLS_token_part = attention_CLS[:second_SEP_position+1]
+
+        print("attention_CLS_token_part shape", np.shape(attention_CLS_token_part))
+        current_time = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
+        output_heatmap_file = os.path.join(training_args.output_dir, "heatmap{}_{}.png".format(sample_index, current_time))
+        df = pd.DataFrame(attention_CLS_token_part.tolist())
+        # df = df.drop(index='[PAD]', errors='ignore')
+        # df = df.drop(columns='[PAD]', errors='ignore')
+        # df.to_csv(os.path.join(training_args.output_dir, "heatmap{}_{}.csv".format(sample_index, current_time)))
+        plt.figure(figsize=(12, 12))
+        ax = sns.heatmap(df, cmap='viridis', yticklabels=tokens[:second_SEP_position+1], xticklabels=['CLS'])#, linewidths=0.5)
+
+        plt.title('Heatmap of Distinct Row and Column Features', fontsize=24)
+        plt.xlabel('Column Features', fontsize=24)
+        plt.ylabel('Row Features', fontsize=24)
+
+        # Adjust the appearance for clarity
+        plt.xticks(rotation=90, ha='right', fontsize=24)  # Rotate the x-axis labels for better readability
+        plt.yticks(rotation=0, fontsize=24)  # Keep the y-axis labels horizontal
+
+        # Display the heatmap
+        plt.savefig(output_heatmap_file)
+
+        # df = pd.DataFrame(average_last_layer_last_head_attention.tolist()[0], columns=tokens, index=tokens)
+        # # df.to_csv('./heatmaps/{}.csv'.format([i))
+        # df = df.drop(index='[PAD]', errors='ignore')
+        # df = df.drop(columns='[PAD]', errors='ignore')
+
+        # current_time = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
+        # output_heatmap_file = os.path.join(training_args.output_dir, "heatmap{}_{}.png".format(sample_index, current_time))
+        # heatmap(df, output_heatmap_file)
+            
     kwargs = {"finetuned_from": model_args.model_name_or_path, "tasks": "text-classification"}
 
     if training_args.push_to_hub:
