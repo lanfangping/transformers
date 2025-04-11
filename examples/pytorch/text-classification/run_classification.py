@@ -23,8 +23,11 @@ import sys
 import warnings
 import difflib
 import datetime
+import copy
 from dataclasses import dataclass, field
 from typing import List, Optional
+from collections import defaultdict
+from tqdm import tqdm
 
 import datasets
 import evaluate
@@ -881,11 +884,13 @@ def main():
         logger.info("*** Predict ***")
         # Removing the `label` columns if exists because it might contains -1 and Trainer won't like that.
         y_true = None
+        predict_dataset_copy = copy.deepcopy(predict_dataset)
         if "label" in predict_dataset.features:
             y_true = predict_dataset['label']
             predict_dataset = predict_dataset.remove_columns("label")
 
         # print(predict_dataset)
+        print("predict_dataset_copy", predict_dataset_copy)
         results = trainer.predict(predict_dataset, metric_key_prefix="predict")
         # print("results", results)
         predictions = results.predictions
@@ -922,89 +927,136 @@ def main():
             with open(output_predict_file, "w") as writer:
                 logger.info("***** Predict results *****")
                 writer.write("index\tprediction\n")
+                predicted_labels = []
+                true_labels = []
                 for index, item in enumerate(predictions):
                     if is_regression:
                         writer.write(f"{index}\t{item:3.3f}\n")
                     elif is_multi_label:
                         # recover from multi-hot encoding
                         item = [label_list[i] for i in range(len(item)) if item[i] == 1]
+                        predicted_labels.append(item)
                         writer.write(f"{index}\t{item}\n")
                     else:
                         item = label_list[item]
                         writer.write(f"{index}\t{item}\n")
+
+                def convert_one_hot_labels(example):
+                    item = example['label']
+                    example['label'] = [label_list[i] for i in range(len(item)) if item[i] == 1]
+                    return example
+
+                def add_predicted_labels(example, idx):
+                    example["predicted_labels"] = predicted_labels[idx]
+                    return example
+                
+                dataset_with_new_column = predict_dataset_copy.map(add_predicted_labels, with_indices=True)
+                dataset_with_new_column = dataset_with_new_column.remove_columns(['input_ids', 'token_type_ids', 'attention_mask'])
+                print("dataset_with_new_column", dataset_with_new_column)
+
+                dataset_with_new_column = dataset_with_new_column.map(convert_one_hot_labels)
+                output_predict_csv_file = os.path.join(training_args.output_dir, "predict_results.csv")
+                dataset_with_new_column.to_csv(output_predict_csv_file, index=False)
+
             logger.info("Predict results saved at {}".format(output_predict_file))
 
             if y_true is not None: 
                 with open(output_metrics_file, "w") as writer:
                     logger.info("***** Predict metrics *****")
-                    report = classification_report(y_true, predictions, output_dict=True)
+                    report = classification_report(y_true, predictions)
                     print(report) 
                     writer.write("{}".format(str(report)))
                 logger.info("Predict metrics saved at {}".format(output_metrics_file))
     
     if model_args.output_attentions:
         model.eval()
-        sample_index = model_args.sample_index_for_output_attentions
 
-        predict_dataset.set_format(type='torch', columns=['input_ids', 'attention_mask', 'token_type_ids'])
-        record = predict_dataset[sample_index]
-        
-        record = {k: v.cuda().unsqueeze(0) for k,v in record.items() if k in ['input_ids', 'token_type_ids', 'attention_mask']}
-
-        attentions = model(**record).attentions  
-        
-        layer = -1 # the last layer
-        last_layer_attention = attentions[layer]
-        # print("attentions shape", attentions[0].size())
-        average_heads_attention = torch.mean(last_layer_attention, dim=1)  # Averaging across heads # For the last layer, shape: [batch_size, num_heads, seq_len, seq_len]
-        tokens = tokenizer.convert_ids_to_tokens(record['input_ids'].tolist()[0])  # Convert input ids to token strings
-        print(tokens)
-        # Assuming you're working with the first item in the batch
-        average_attention_np = average_heads_attention[0].cpu().detach().numpy()
-        print("average_attention_np", np.shape(average_attention_np))
-
-        # attention only for CLS token
-        attention_CLS = average_attention_np[:][0]
-        print("attention_CLS shape", np.shape(attention_CLS))
-        attention_CLS = attention_CLS.reshape((np.shape(attention_CLS)[0], 1))
-        print("attention_CLS reshape", np.shape(attention_CLS))
-        second_SEP_position = 0
-        for i in range(len(tokens)-1, 0, -1):
-            if tokens[i] == '[SEP]':
-                second_SEP_position = i
-        print("second_SEP_position", second_SEP_position)
-        attention_CLS_token_part = attention_CLS[:second_SEP_position+1]
-
-        print("attention_CLS_token_part shape", np.shape(attention_CLS_token_part))
-        current_time = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
-        output_heatmap_file = os.path.join(training_args.output_dir, "heatmap{}_{}.png".format(sample_index, current_time))
-        df = pd.DataFrame(attention_CLS_token_part.tolist())
-        # df = df.drop(index='[PAD]', errors='ignore')
-        # df = df.drop(columns='[PAD]', errors='ignore')
-        # df.to_csv(os.path.join(training_args.output_dir, "heatmap{}_{}.csv".format(sample_index, current_time)))
-        plt.figure(figsize=(12, 12))
-        ax = sns.heatmap(df, cmap='viridis', yticklabels=tokens[:second_SEP_position+1], xticklabels=['CLS'])#, linewidths=0.5)
-
-        plt.title('Heatmap of Distinct Row and Column Features', fontsize=24)
-        plt.xlabel('Column Features', fontsize=24)
-        plt.ylabel('Row Features', fontsize=24)
-
-        # Adjust the appearance for clarity
-        plt.xticks(rotation=90, ha='right', fontsize=24)  # Rotate the x-axis labels for better readability
-        plt.yticks(rotation=0, fontsize=24)  # Keep the y-axis labels horizontal
-
-        # Display the heatmap
-        plt.savefig(output_heatmap_file)
-
-        # df = pd.DataFrame(average_last_layer_last_head_attention.tolist()[0], columns=tokens, index=tokens)
-        # # df.to_csv('./heatmaps/{}.csv'.format([i))
-        # df = df.drop(index='[PAD]', errors='ignore')
-        # df = df.drop(columns='[PAD]', errors='ignore')
-
-        # current_time = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
-        # output_heatmap_file = os.path.join(training_args.output_dir, "heatmap{}_{}.png".format(sample_index, current_time))
-        # heatmap(df, output_heatmap_file)
+        def draw_heatmaps(sample_index):
+            predict_dataset.set_format(type='torch', columns=['input_ids', 'attention_mask', 'token_type_ids'])
+            record = predict_dataset[sample_index]
             
+            record = {k: v.cuda().unsqueeze(0) for k,v in record.items() if k in ['input_ids', 'token_type_ids', 'attention_mask']}
+
+            attentions = model(**record).attentions  
+            
+            layer = -1 # the last layer
+            last_layer_attention = attentions[layer]
+            # print("attentions shape", attentions[0].size())
+            average_heads_attention = torch.mean(last_layer_attention, dim=1)  # Averaging across heads # For the last layer, shape: [batch_size, num_heads, seq_len, seq_len]
+            tokens = tokenizer.convert_ids_to_tokens(record['input_ids'].tolist()[0])  # Convert input ids to token strings
+            # print(tokens)
+            words = tokenizer.decode(record['input_ids'].tolist()[0])
+            # print(words)
+            # Assuming you're working with the first item in the batch
+            average_attention_np = average_heads_attention[0].cpu().detach().numpy()
+            # print("average_attention_np", np.shape(average_attention_np))
+
+            # attention only for CLS token
+            attention_CLS = average_attention_np[:][0]
+            # print("attention_CLS shape", np.shape(attention_CLS))
+            attention_CLS = attention_CLS.reshape((np.shape(attention_CLS)[0], 1))
+            # print("attention_CLS reshape", np.shape(attention_CLS))
+
+            # find the [SEP] token, and remove the [PAD] after the [SEP]
+            first_SEP_position = None
+            second_SEP_position = None
+            for i in range(len(tokens)):
+                if tokens[i] == '[SEP]':
+                    if first_SEP_position is None:
+                        first_SEP_position = i
+                    elif second_SEP_position is None:
+                        second_SEP_position = i
+                        break
+            # print("second_SEP_position", second_SEP_position)
+            attention_first_sentence = attention_CLS[:first_SEP_position+1]
+            tokens_first_sentence = tokens[:first_SEP_position+1]
+            # print("tokens_first_sentence =", tokens_first_sentence)
+            # print("attention_first_sentence =", attention_first_sentence.tolist())
+            attention_second_sentence = attention_CLS[first_SEP_position:second_SEP_position+1]
+            tokens_second_sentence = tokens[first_SEP_position:second_SEP_position+1]
+            # print("tokens_second_sentence =", tokens_second_sentence)
+            # print("attention_second_sentence =", attention_second_sentence.tolist())
+
+            # current_time = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
+            output_heatmap_file = os.path.join(training_args.output_dir, "heatmaps/heatmap{}.png".format(sample_index))
+            df1 = pd.DataFrame(attention_first_sentence.tolist())
+            df2 = pd.DataFrame(attention_second_sentence.tolist())
+
+            # Determine the global min and max of the data for both heatmaps to use the same color scale
+            vmin = min(df1.values.min(), df2.values.min())
+            vmax = max(df1.values.max(), df2.values.max())
+
+            # Create a figure to hold the subplots
+            fig, axs = plt.subplots(nrows=1, ncols=2, figsize=(4, 12))
+
+            # Increase the space between the heatmaps
+            plt.subplots_adjust(hspace=max(len(tokens_first_sentence), len(tokens_second_sentence)) / 1)  # Adjust the vertical space between plots
+
+            # Plot the first heatmap
+            sns.heatmap(df1, ax=axs[0], cmap="viridis", yticklabels=tokens_first_sentence, xticklabels=['[CLS]'],  vmin=vmin, vmax=vmax, cbar=False)
+            axs[0].set_title('old_snippet')
+
+            # Plot the second heatmap
+            heatmap2 = sns.heatmap(df2, ax=axs[1], cmap="viridis", yticklabels=tokens_second_sentence, xticklabels=['[CLS]'], vmin=vmin, vmax=vmax, cbar=False)
+            axs[1].set_title('new_snippet')
+
+            # Adjust layout for the colorbar
+            plt.subplots_adjust(right=0.85, hspace=0.9)
+
+            plt.tight_layout(pad=4)
+
+            # Create a colorbar
+            cbar_ax = fig.add_axes([0.9, 0.15, 0.03, 0.7]) # [left, bottom, width, height]
+            fig.colorbar(heatmap2.collections[0], cax=cbar_ax)
+            
+            # Show the plot
+            plt.savefig(output_heatmap_file)
+
+        for i in tqdm(range(len(predict_dataset))):
+            draw_heatmaps(i)
+        # sample_index = model_args.sample_index_for_output_attentions
+        # draw_heatmaps(sample_index)
+
     kwargs = {"finetuned_from": model_args.model_name_or_path, "tasks": "text-classification"}
 
     if training_args.push_to_hub:

@@ -21,7 +21,7 @@ python run_classification.py \
 train_file_dir="../../../../CompareDBDoc/datasets/data_humanlabel/train_valid_test_data/spc2/train_data_Jan19.csv"
 test_file_dir="../../../../CompareDBDoc/datasets/data_humanlabel/train_valid_test_data/spc2/sampled_data_Jan19.csv"
 validation_file_dir="../../../../CompareDBDoc/datasets/data_humanlabel/train_valid_test_data/spc2/valid_data_Jan19.csv"
-output_dir="./checkpoints/checkpoints2402191335"
+output_dir="./checkpoints/checkpoints-cased-attentionmask"
 CUDA_VISIBLE_DEVICES=0 python run_classification.py \
     --model_name_or_path bert-base-cased \
     --train_file ${train_file_dir} \
@@ -49,7 +49,7 @@ CUDA_VISIBLE_DEVICES=0 python run_classification.py \
 train_file_dir="../../../../CompareDBDoc/datasets/data_humanlabel/train_valid_test_data/spc2/train_data_Jan19.csv"
 test_file_dir="../../../../CompareDBDoc/datasets/data_humanlabel/train_valid_test_data/spc2/sampled_data_Jan19.csv"
 validation_file_dir="../../../../CompareDBDoc/datasets/data_humanlabel/train_valid_test_data/spc2/valid_data_Jan19.csv"
-output_dir="./checkpoints/checkpoints2402182209"
+output_dir="./checkpoints/checkpoints-cased-naive"
 CUDA_VISIBLE_DEVICES=0 python run_classification.py \
     --model_name_or_path ${output_dir} \
     --train_file ${train_file_dir} \
@@ -60,7 +60,7 @@ CUDA_VISIBLE_DEVICES=0 python run_classification.py \
     --text_column_name old_snippet \
     --text_pair_column_name new_snippet \
     --label_column_name labels \
-    --enhance_attention_on_difference True \
+    --enhance_attention_on_difference False \
     --do_predict \
     --max_seq_length 512 \
     --per_device_train_batch_size 8 \
@@ -73,7 +73,7 @@ CUDA_VISIBLE_DEVICES=0 python run_classification.py \
 train_file_dir="../../../../CompareDBDoc/datasets/data_humanlabel/train_valid_test_data/spc2/train_data_Jan19.csv"
 test_file_dir="../../../../CompareDBDoc/datasets/data_humanlabel/train_valid_test_data/spc2/sampled_data_Jan19.csv"
 validation_file_dir="../../../../CompareDBDoc/datasets/data_humanlabel/train_valid_test_data/spc2/valid_data_Jan19.csv"
-output_dir="./checkpoints/checkpoints2402191335"
+output_dir="./checkpoints/checkpoints-cased-attentionmask"
 CUDA_VISIBLE_DEVICES=0 python run_classification.py \
     --model_name_or_path ${output_dir} \
     --train_file ${train_file_dir} \

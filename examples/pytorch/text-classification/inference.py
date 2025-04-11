@@ -1,45 +1,8 @@
-import numpy as np
-from sklearn.metrics import roc_curve, auc
-import seaborn as sns
-import matplotlib.pyplot as plt
+from transformers import AutoTokenizer, AutoModel, utils
+from torch import tensor
+from bertviz import model_view
+utils.logging.set_verbosity_error()  # Suppress standard warnings
 import difflib
-
-def optimal_threshold(y_true, y_pred):
-    y_true = np.concatenate(y_true)
-    y_pred = y_pred.ravel()
-
-    # Calculate ROC curve
-    fpr, tpr, thresholds = roc_curve(y_true, y_pred)
-    roc_auc = auc(fpr, tpr)
-
-    # Calculate Youden's J statistic
-    J = tpr - fpr
-
-    # Find the optimal threshold
-    optimal_idx = np.argmax(J)
-    optimal_threshold = thresholds[optimal_idx]
-
-    return optimal_threshold
-
-
-def heatmap(data, output_dir='./heatmaps'):
-    """
-    Create the heatmap of attention weight
-    """
-    plt.figure(figsize=(12, 12))
-    ax = sns.heatmap(data, cmap='viridis', linewidths=0.5)
-
-    plt.title('Heatmap of Distinct Row and Column Features', fontsize=24)
-    plt.xlabel('Column Features', fontsize=24)
-    plt.ylabel('Row Features', fontsize=24)
-
-    # Adjust the appearance for clarity
-    plt.xticks(rotation=90, ha='right', fontsize=24)  # Rotate the x-axis labels for better readability
-    plt.yticks(rotation=0, fontsize=24)  # Keep the y-axis labels horizontal
-
-    # Display the heatmap
-    plt.show()
-    plt.savefig(output_dir)
 
 def find_first_element_in_list(element, array_list, begin_idx=0):
         for idx in range(begin_idx, len(array_list)):
@@ -102,3 +65,21 @@ def process_attention_weight(tokenizer, input_ids):
         attetion_masks.append(atte_mask)
 
     return attetion_masks
+
+model_name = "./checkpoints/checkpoints2402191335"  # Find popular HuggingFace models here: https://huggingface.co/models
+# input_text = "The cat sat on the mat"  
+old_snippet = "Less likely to cause problems is the minimum size for shared memory segments (SHMMIN), which should be at most approximately 500 kB for PostgreSQL (it is usually just 1)."
+new_snippet = "Less likely to cause problems is the minimum size for shared memory segments (SHMMIN), which should be at most approximately 32 bytes for PostgreSQL (it is usually just 1). The maximum number of segments system-wide (SHMMNI) or per-process (SHMSEG) are unlikely to cause a problem unless your system has them set to zero."
+model = AutoModel.from_pretrained(model_name, output_attentions=True)  # Configure model to return attention values
+tokenizer = AutoTokenizer.from_pretrained(model_name, )
+inputs = tokenizer(old_snippet, new_snippet, return_tensors='pt')  # Tokenize input text
+inputs = {k: v.to(model.device) for k,v in inputs.items()}
+print(inputs)
+print("default attention", inputs['attention_mask'])
+inputs['attention_mask'] = tensor(process_attention_weight(tokenizer, inputs['input_ids']))
+print("updated attention", inputs['attention_mask'])
+
+outputs = model(inputs)  # Run model
+attention = outputs[-1]  # Retrieve attention from model outputs
+tokens = tokenizer.convert_ids_to_tokens(inputs[0])  # Convert input ids to token strings
+model_view(attention, tokens)  # Display model view
